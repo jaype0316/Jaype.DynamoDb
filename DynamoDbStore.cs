@@ -70,6 +70,8 @@ namespace Jaype.DynamoDb
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = DetermineTableName(instance);
+            if (!await TableExists(tableName))
+                throw new InvalidOperationException($"{tableName} does not exist");
 
             var partitionKeyProperty = pkeyExpression.GetPropertyName(); 
             var sortKeyProperty = skeyExpression.GetPropertyName();
@@ -107,6 +109,9 @@ namespace Jaype.DynamoDb
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = this.DetermineTableName<T>(instance);
+            if (await TableExists(tableName))
+                return new Response(System.Net.HttpStatusCode.BadRequest, message:"Table already exists");
+            
             var partitionKey = pkeyExpression.GetPropertyName();
             var sortKey = skeyExpression.GetPropertyName();
 
@@ -144,6 +149,9 @@ namespace Jaype.DynamoDb
         public async Task<Response> Save<T>(T item) where T: class
         {
             var tableName = this.DetermineTableName(item);
+            if (!await TableExists(tableName))
+                throw new InvalidOperationException($"{tableName} does not exist");
+
             var saveItem = this.DetermineAttributeValues(item);
 
             var request = new PutItemRequest()
@@ -160,6 +168,8 @@ namespace Jaype.DynamoDb
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = DetermineTableName(instance);
+            if (!await TableExists(tableName))
+                throw new InvalidOperationException($"{tableName} does not exist");
 
             var partitionKeyProperty = pkeyExpression.GetPropertyName(); 
             var pKeyPropertySanitized = SanitizePropertyKeyName(partitionKeyProperty);
@@ -197,6 +207,12 @@ namespace Jaype.DynamoDb
                 resolvedTableName = resolvedTableName.ToPlural();
 
             return _dynamoDbOptions.CamelCaseTableName ? resolvedTableName.ToCamelCase() : resolvedTableName;
+        }
+
+        private async Task<bool> TableExists(string tableName)
+        {
+            var response = await _client.ListTablesAsync();
+            return response.TableNames.Contains(tableName);
         }
 
         private Dictionary<string, AttributeValue> DetermineAttributeValues<T>(T item) where T : class

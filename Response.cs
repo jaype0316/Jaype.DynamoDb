@@ -10,9 +10,11 @@ namespace Jaype.DynamoDb
     public record Response
     {
         public HttpStatusCode StatusCode { get; } = HttpStatusCode.OK;
-        public Response(HttpStatusCode statusCode)
+        public string Message { get; }
+        public Response(HttpStatusCode statusCode, string message = null)
         {
             StatusCode = statusCode;
+            Message = message;
         }
 
     }
