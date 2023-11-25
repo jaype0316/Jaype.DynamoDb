@@ -1,6 +1,7 @@
 ﻿using Amazon.DynamoDBv2.Model;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.Tracing;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Text;
@@ -30,6 +31,9 @@ namespace Jaype.DynamoDb
                 return value;
 
             string[] words = value.Split('_');
+            if (words.Length == 1)
+                return value.ToLower();
+
             string camelCasedString = words[0];
 
             for (int i = 1; i < words.Length; i++)
@@ -38,6 +42,17 @@ namespace Jaype.DynamoDb
             }
 
             return camelCasedString;
+        }
+
+        public static string ToPlural(this string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            if (value.EndsWith("y", StringComparison.OrdinalIgnoreCase))
+                return value.Substring(0, value.Length - 1) + "ies";
+
+            return value + "s";
         }
     }
 }

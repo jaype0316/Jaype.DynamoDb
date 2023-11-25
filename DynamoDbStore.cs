@@ -14,7 +14,7 @@ namespace Jaype.DynamoDb
         internal bool CamelCaseTableName { get; private set; }
         internal bool PluralizeTableName { get; private set; }
         internal bool LowerCaseClassName { get; private set; }  
-        internal bool LowerCasePropertyName { get; private set; }
+        internal bool CamelCaseProperties { get; private set; }
 
         public DynamoDbStoreOptions UseCamelCaseTableName()
         {
@@ -30,7 +30,7 @@ namespace Jaype.DynamoDb
 
         public DynamoDbStoreOptions UseCamelCaseProperties()
         {
-            LowerCasePropertyName = true;
+            CamelCaseProperties = true;
             return this;
         }
     }
@@ -74,8 +74,8 @@ namespace Jaype.DynamoDb
             var partitionKeyProperty = pkeyExpression.GetPropertyName(); 
             var sortKeyProperty = skeyExpression.GetPropertyName();
                 
-            var pKeyAttributeValue = TryResolveKeyAttributeValue(partitionKeyProperty, pkeyValue);
-            var sKeyAttributeValue = TryResolveKeyAttributeValue(sortKeyProperty, sortKeyValue);
+            var pKeyAttributeValue = TryResolveKeyAttributeValue(instance, partitionKeyProperty);
+            var sKeyAttributeValue = TryResolveKeyAttributeValue(instance, sortKeyProperty);
 
             var pKeyPropertySanitized = SanitizePropertyKeyName(partitionKeyProperty);
             var sKeyPropertySanitized = SanitizePropertyKeyName(sortKeyProperty);
@@ -103,40 +103,57 @@ namespace Jaype.DynamoDb
         /// <param name="pkeyExpression">The partition key to use for the table</param>
         /// <param name="skeyExpression">The sort key to use for the table</param>
         /// <returns></returns>
-        public async Task<CreateTableResponse> CreateTable<T>(Expression<Func<T, object>> pkeyExpression, Expression<Func<T, object>> skeyExpression) where T : class
+        public async Task<Response> CreateTable<T>(Expression<Func<T, object>> pkeyExpression, Expression<Func<T, object>> skeyExpression) where T : class
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = this.DetermineTableName<T>(instance);
             var partitionKey = pkeyExpression.GetPropertyName();
             var sortKey = skeyExpression.GetPropertyName();
-          
+
+            var partitionKeySanitized = SanitizePropertyKeyName(partitionKey);
+            var sortKeySanitized = SanitizePropertyKeyName(sortKey);
             var request = new CreateTableRequest
             {
                 TableName = tableName,
                 AttributeDefinitions = new List<AttributeDefinition>
                 {
-                    DetermineAttributeDefinition(partitionKey)
+                    DetermineAttributeDefinition(instance, partitionKey),
                 },
                 KeySchema = new List<KeySchemaElement>
                 {
-                    new KeySchemaElement(partitionKey, KeyType.HASH)
+                    new KeySchemaElement(partitionKeySanitized, KeyType.HASH)
                 },
                 ProvisionedThroughput = new ProvisionedThroughput
                 {
-                    ReadCapacityUnits = 5, // Adjust according to your needs
-                    WriteCapacityUnits = 5 // Adjust according to your needs
+                    ReadCapacityUnits = 5, 
+                    WriteCapacityUnits = 5 
                 }
             };
 
             if(!string.IsNullOrWhiteSpace(sortKey))
             {
-                var sortKeyAttrDefinition = DetermineAttributeDefinition(sortKey);
+                var sortKeyAttrDefinition = DetermineAttributeDefinition(instance, sortKey);
                 request.AttributeDefinitions.Add(sortKeyAttrDefinition);
-                request.KeySchema.Add(new KeySchemaElement(sortKey, KeyType.RANGE));
+                request.KeySchema.Add(new KeySchemaElement(sortKeySanitized, KeyType.RANGE));
             }
 
             var response = await _client.CreateTableAsync(request);
-            return new CreateTableResponse(response.HttpStatusCode);
+            return new Response(response.HttpStatusCode);
+        }
+
+        public async Task<Response> Save<T>(T item) where T: class
+        {
+            var tableName = this.DetermineTableName(item);
+            var saveItem = this.DetermineAttributeValues(item);
+
+            var request = new PutItemRequest()
+            {
+                TableName = tableName,
+                Item = saveItem
+            };
+
+            var response = await _client.PutItemAsync(request);
+            return new Response(response.HttpStatusCode);
         }
 
         public async Task<IReadOnlyCollection<T>> Query<T>(Expression<Func<T, object>> pkeyExpression, object pkeyValue) where T : class
@@ -176,24 +193,42 @@ namespace Jaype.DynamoDb
         {
             var dynamoTableAttribute = Attribute.GetCustomAttribute(typeof(T), typeof(DynamoDbTableAttribute)) as DynamoDbTableAttribute;
             var resolvedTableName = dynamoTableAttribute == null ? typeof(T).Name : dynamoTableAttribute.Name;
+            if (_dynamoDbOptions.PluralizeTableName)
+                resolvedTableName = resolvedTableName.ToPlural();
 
             return _dynamoDbOptions.CamelCaseTableName ? resolvedTableName.ToCamelCase() : resolvedTableName;
         }
 
-        private void ThrowIfNull<T>(T item) where T: class
+        private Dictionary<string, AttributeValue> DetermineAttributeValues<T>(T item) where T : class
         {
-            if(item is null) throw new ArgumentNullException(nameof(item));
+            var map =new Dictionary<string, AttributeValue>();
+            var properties = typeof(T).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            foreach (var property in properties)
+            {
+                if (!map.ContainsKey(property.Name))
+                {
+                    var attributeValue = this.TryResolveKeyAttributeValue(item, property.Name);
+                    
+                    map.Add(SanitizePropertyKeyName(property.Name), attributeValue);    
+                }
+            }
+            return map;
         }
 
-        private AttributeValue TryResolveKeyAttributeValue<TMember>(TMember member, object value)
+        private AttributeValue TryResolveKeyAttributeValue<TType, TMember>(TType type, TMember member)
         {
             try
             {
                 AttributeValue attr = null;
-                var pkeyPropertyClrType = member.GetType().Name.ToLower();
-                if (_clrToDynamoTypesMap.TryGetValue(pkeyPropertyClrType, out var dynamoDbType))
+                var clrProperty = type.GetType().GetProperty(member.ToString());
+                var clrType = clrProperty.PropertyType.Name.ToLower();
+                if (_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
                 {
                     attr = new AttributeValue();
+                    var value = clrProperty.GetValue(type);
+                    if (dynamoDbType == "N" || dynamoDbType == "S")
+                        value = value.ToString(); //per aws docs, number types are sent as strings to dynamoDb
+
                     attr.GetType().GetProperty(dynamoDbType).SetValue(attr, value);
                 }
 
@@ -206,7 +241,7 @@ namespace Jaype.DynamoDb
            
         }
 
-        private AttributeDefinition DetermineAttributeDefinition<TMember>(TMember member)
+        private AttributeDefinition DetermineAttributeDefinition<TType, TMember>(TType type, TMember member)
         {
             Func<string, ScalarAttributeType> mapper = (str) =>
             {
@@ -220,18 +255,19 @@ namespace Jaype.DynamoDb
             };
 
             AttributeDefinition attr = null;
-            var clrType = member.GetType().Name.ToLower();
+            var clrProperty = type.GetType().GetProperty(member.ToString());
+            var clrType = clrProperty.PropertyType.Name.ToLower();
             if(_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
             {
                 var scalarAttributeType = mapper(dynamoDbType);
-                attr = new AttributeDefinition(nameof(member), scalarAttributeType);
+                attr = new AttributeDefinition(SanitizePropertyKeyName(member.ToString()), scalarAttributeType);
             }
 
             return attr;
         }
 
 
-        private string SanitizePropertyKeyName(string keyName) => _dynamoDbOptions.LowerCasePropertyName ? keyName.ToLower() : keyName;
+        private string SanitizePropertyKeyName(string keyName) => _dynamoDbOptions.CamelCaseProperties ? keyName.ToCamelCase() : keyName;
         
     }
 

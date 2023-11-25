@@ -7,10 +7,10 @@ using System.Threading.Tasks;
 
 namespace Jaype.DynamoDb
 {
-    public record CreateTableResponse
+    public record Response
     {
         public HttpStatusCode StatusCode { get; } = HttpStatusCode.OK;
-        public CreateTableResponse(HttpStatusCode statusCode)
+        public Response(HttpStatusCode statusCode)
         {
             StatusCode = statusCode;
         }
