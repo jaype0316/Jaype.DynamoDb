@@ -47,7 +47,9 @@ namespace Jaype.DynamoDb
             { "double", "N"},
             { "float", "N"},
             { "string", "S"},
-            { "datetime", "S"}
+            { "datetime", "S"},
+            { "ienumerable`1", "SS"},
+            { "nullable`1", "N"}
         }; //todo: move this out
 
         public DynamoDbStore(IAmazonDynamoDB client, Action<DynamoDbStoreOptions> options)
@@ -203,7 +205,7 @@ namespace Jaype.DynamoDb
         {
             var dynamoTableAttribute = Attribute.GetCustomAttribute(typeof(T), typeof(DynamoDbTableAttribute)) as DynamoDbTableAttribute;
             var resolvedTableName = dynamoTableAttribute == null ? typeof(T).Name : dynamoTableAttribute.Name;
-            if (_dynamoDbOptions.PluralizeTableName)
+            if (dynamoTableAttribute is null && _dynamoDbOptions.PluralizeTableName)
                 resolvedTableName = resolvedTableName.ToPlural();
 
             return _dynamoDbOptions.CamelCaseTableName ? resolvedTableName.ToCamelCase() : resolvedTableName;
@@ -224,8 +226,8 @@ namespace Jaype.DynamoDb
                 if (!map.ContainsKey(property.Name))
                 {
                     var attributeValue = this.TryResolveKeyAttributeValue(item, property.Name);
-                    
-                    map.Add(SanitizePropertyKeyName(property.Name), attributeValue);    
+                    if(attributeValue != null) 
+                        map.Add(SanitizePropertyKeyName(property.Name), attributeValue);    
                 }
             }
             return map;
@@ -241,10 +243,26 @@ namespace Jaype.DynamoDb
                 if (_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
                 {
                     attr = new AttributeValue();
+                    
                     var value = clrProperty.GetValue(type);
                     if (dynamoDbType == "N" || dynamoDbType == "S")
-                        value = value.ToString(); //per aws docs, number types are sent as strings to dynamoDb
-
+                    {
+                        value = value?.ToString(); //per aws docs, number types are sent as strings to dynamoDb
+                        if (value == default)
+                            return null;
+                    }
+                    if (dynamoDbType == "SS")
+                    {
+                        value = value as List<string> ?? new List<string>();
+                        if ((value as List<string>).Count == default)
+                            return null;
+                    }
+                    if (clrType == "nullable`1")
+                    {
+                        var underyingType = Nullable.GetUnderlyingType(clrProperty.PropertyType);
+                        value = value?.ToString();                       
+                    }
+                      
                     attr.GetType().GetProperty(dynamoDbType).SetValue(attr, value);
                 }
 
