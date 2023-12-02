@@ -39,6 +39,9 @@ namespace Jaype.DynamoDb
         readonly IAmazonDynamoDB _client;
         readonly DynamoDbStoreOptions _dynamoDbOptions;
         readonly JsonSerializerOptions _jsonSerializerOptions;
+        const int BATCH_SAVE_THROTTLE_SECONDS = 2;
+        const int BATCH_SAVE_ITEMS_COUNT_LIMIT = 25; //per dynamodb api restriction
+
         private Dictionary<string, string> _clrToDynamoTypesMap = new Dictionary<string, string>()
         {
             { "bool", "BOOL"},
@@ -58,6 +61,7 @@ namespace Jaype.DynamoDb
             options(_dynamoDbOptions);
 
             _client = client;
+
             _jsonSerializerOptions = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
@@ -164,6 +168,50 @@ namespace Jaype.DynamoDb
 
             var response = await _client.PutItemAsync(request);
             return new Response(response.HttpStatusCode);
+        }
+        public async Task<Response> BatchSave<T>(IList<T> items) where T : class
+        {
+            if (items.Count() == 0)
+                return new Response(System.Net.HttpStatusCode.OK);
+
+            var tableName = this.DetermineTableName(items.FirstOrDefault());
+            if (!await TableExists(tableName))
+                throw new InvalidOperationException($"{tableName} does not exist");
+       
+            var itemsToPut = new List<Dictionary<string, AttributeValue>>();
+            var pagedItems = items.Skip(0).Take(BATCH_SAVE_ITEMS_COUNT_LIMIT).ToList();
+                
+            foreach (var item in pagedItems)
+            {
+                var itemToPut = this.DetermineAttributeValues(item);
+                itemsToPut.Add(itemToPut);
+            }
+
+            var batchWriteRequest = new BatchWriteItemRequest
+            {
+                RequestItems = new Dictionary<string, List<WriteRequest>>
+                {
+                    {
+                        tableName,
+                        itemsToPut.Select(item => new WriteRequest
+                        {
+                            PutRequest = new PutRequest
+                            {
+                                Item = new Dictionary<string, AttributeValue>(item)
+                            }
+                        }).ToList()
+                    }
+                }
+            };
+
+            await _client.BatchWriteItemAsync(batchWriteRequest);
+
+            int pagedCounter = Math.Min(pagedItems.Count, BATCH_SAVE_ITEMS_COUNT_LIMIT);
+            items = items.Skip(pagedCounter).ToList();
+
+            //throttle
+            Thread.Sleep(BATCH_SAVE_THROTTLE_SECONDS * 1000);
+            return await this.BatchSave(items);                    
         }
 
         public async Task<IReadOnlyCollection<T>> Query<T>(Expression<Func<T, object>> pkeyExpression, object pkeyValue) where T : class
