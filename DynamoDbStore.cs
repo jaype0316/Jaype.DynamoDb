@@ -1,4 +1,5 @@
 ﻿using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.DataModel;
 using Amazon.DynamoDBv2.DocumentModel;
 using Amazon.DynamoDBv2.Model;
 using Amazon.Runtime.Internal.Util;
@@ -152,6 +153,73 @@ namespace Jaype.DynamoDb
             return new Response(response.HttpStatusCode);
         }
 
+        /// <summary>
+        /// Creates an index against the sort key
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="indexKeyExpression"></param>
+        /// <param name="sortKeyExpression"></param>
+        /// <param name="indexName"></param>
+        /// <returns></returns>
+        public async Task<Response> CreateIndex<T>(Expression<Func<T, object>> indexKeyExpression, Expression<Func<T, object>> indexSortExpression = null, string indexName = null) where T : class
+        {
+            var instance = Activator.CreateInstance<T>();
+            var tableName = this.DetermineTableName<T>(instance);
+            if (!await TableExists(tableName))
+                return new Response(System.Net.HttpStatusCode.BadRequest, message: "Cannot create the index because the table doesn't exist. Create the table first");
+
+            var indexKey = indexKeyExpression.GetPropertyName();
+            var indexKeySanitized = this.SanitizePropertyKeyName(indexKey);
+            indexName = indexName ?? this.InferIndexName(tableName, indexKeySanitized);
+
+            var indexExists = await this.IndexExists(tableName, indexName);
+            if (indexExists)
+                return new Response(System.Net.HttpStatusCode.BadRequest, message: $"Index {indexName} already exists");
+
+            var sortKey = indexSortExpression?.GetPropertyName();
+            var sortKeySanitized = sortKey != null ? this.SanitizePropertyKeyName(sortKey) : null;
+            var keySchema = new List<KeySchemaElement>
+            {
+                new KeySchemaElement(indexKeySanitized, KeyType.HASH)
+            };
+            if(!string.IsNullOrEmpty(sortKeySanitized))
+                keySchema.Add(new KeySchemaElement(sortKeySanitized, KeyType.RANGE));
+
+            var provisionedThroughput = new ProvisionedThroughput
+            {
+                ReadCapacityUnits = 5, 
+                WriteCapacityUnits = 5 
+            };
+
+            // Create the update table request with the global secondary index
+            var updateTableRequest = new UpdateTableRequest
+            {
+                TableName = tableName,
+                AttributeDefinitions = new List<AttributeDefinition>
+                {
+                   this.DetermineAttributeDefinition(instance, indexKey)
+                },
+                GlobalSecondaryIndexUpdates = new List<GlobalSecondaryIndexUpdate>
+                {
+                    new GlobalSecondaryIndexUpdate
+                    {
+                        Create = new CreateGlobalSecondaryIndexAction()
+                        {
+                             IndexName = indexName,
+                             KeySchema = keySchema,
+                             Projection = new Projection(){ ProjectionType = ProjectionType.ALL },
+                             ProvisionedThroughput = provisionedThroughput
+                        }
+                    }
+                }
+            };
+            if (!string.IsNullOrEmpty(sortKeySanitized))
+                updateTableRequest.AttributeDefinitions.Add(this.DetermineAttributeDefinition(instance, sortKey));
+
+            var response = await _client.UpdateTableAsync(updateTableRequest);
+            return new Response(response.HttpStatusCode);
+        }
+
         public async Task<Response> Save<T>(T item) where T: class
         {
             var tableName = this.DetermineTableName(item);
@@ -249,6 +317,47 @@ namespace Jaype.DynamoDb
             return items.AsReadOnly();
         }
 
+        public async Task<IReadOnlyCollection<T>> QueryByIndex<T>(Expression<Func<T, object>> indexKeyExpression, string value, string indexName = null) where T : class
+        {
+            var instance = Activator.CreateInstance<T>();
+            var tableName = DetermineTableName(instance);
+
+            if (!await TableExists(tableName))
+                throw new InvalidOperationException($"{tableName} does not exist");
+
+            var indexKey = indexKeyExpression.GetPropertyName();
+            var indexKeySanitized = SanitizePropertyKeyName(indexKey);
+
+            indexName = indexName ?? this.InferIndexName(tableName, indexKeySanitized);
+            // Create a Query operation with the sort key value and index name
+            var filter = new QueryFilter(indexKeySanitized, QueryOperator.Equal, value);
+            var query = new QueryRequest()
+            {
+                TableName = tableName,
+                IndexName = indexName,
+                KeyConditionExpression = $"#{indexKeySanitized} = :{indexKeySanitized}",
+                ExpressionAttributeNames = new Dictionary<string, string>
+                {
+                    { $"#{indexKeySanitized}", indexKeySanitized } // Replace "SortKey" with your actual sort key attribute name
+                },
+                ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+                {
+                    { $":{indexKeySanitized}", new AttributeValue(value) }
+                }
+            };
+
+            var response = await _client.QueryAsync(query);
+            var items = new List<T>();
+            foreach (var item in response.Items)
+            {
+                var itemAsJson = Document.FromAttributeMap(item).ToJson();
+                var clrType = JsonSerializer.Deserialize<T>(itemAsJson, _jsonSerializerOptions);
+                items.Add(clrType);
+            }
+
+            return items.AsReadOnly();
+        }
+
         private string DetermineTableName<T>(T item) where T : class
         {
             var dynamoTableAttribute = Attribute.GetCustomAttribute(typeof(T), typeof(DynamoDbTableAttribute)) as DynamoDbTableAttribute;
@@ -263,6 +372,17 @@ namespace Jaype.DynamoDb
         {
             var response = await _client.ListTablesAsync();
             return response.TableNames.Contains(tableName);
+        }
+
+        private async Task<bool> IndexExists(string tableName, string indexName)
+        {
+            var describeTableResponse = await _client.DescribeTableAsync(new DescribeTableRequest
+            {
+                TableName = tableName
+            });
+
+            // Check if the index exists in the table description
+            return describeTableResponse.Table.GlobalSecondaryIndexes.Exists(i => i.IndexName == indexName);
         }
 
         private Dictionary<string, AttributeValue> DetermineAttributeValues<T>(T item) where T : class
@@ -350,6 +470,7 @@ namespace Jaype.DynamoDb
 
 
         private string SanitizePropertyKeyName(string keyName) => _dynamoDbOptions.CamelCaseProperties ? keyName.ToCamelCase() : keyName;
+        private string InferIndexName(string tableName, string partitionKey) => $"idx_{tableName}_{partitionKey}";
         
     }
 
