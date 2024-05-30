@@ -436,18 +436,19 @@ namespace Jaype.DynamoDb
                     } 
                     else if(dynamoDbType == "L")
                     {
-                        var innerType = clrProperty.PropertyType.GetTypeInfo().GetGenericArguments()[0];
-                        //var innerType = clrProperty.GetType().GenericTypeArguments[0];
-                        IList unboxedList = ReflectionHelper.CastToList(innerType, value);
-                        var listContent = new List<AttributeValue>();
-                        //var listContentItem = new Dictionary<string, AttributeValue>();
-                        foreach(var item in unboxedList)
-                        {
-                            var listContentItem = DetermineAttributeValues(item);
-                            listContent.Add(new AttributeValue() { M = listContentItem });
-                            //new AttributeValue() { L  }
-                        } 
-                        value = listContent;
+                        //var innerType = clrProperty.PropertyType.GetTypeInfo().GetGenericArguments()[0];
+                        //IList unboxedList = ReflectionHelper.CastToList(innerType, value);
+                        //var listContent = new List<AttributeValue>();
+
+                        //foreach(var item in unboxedList)
+                        //{
+                        //    var listContentItem = DetermineAttributeValues(item);
+                        //    listContent.Add(new AttributeValue() { M = listContentItem });
+                        //} 
+                        //value = listContent;
+                        //override the L dynamo type, setting it to S and just serializing the value to a json string.
+                        dynamoDbType = "S";
+                        value = JsonSerializer.Serialize(value);
                     }
                       
                     attr.GetType().GetProperty(dynamoDbType).SetValue(attr, value);
