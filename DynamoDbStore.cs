@@ -3,8 +3,11 @@ using Amazon.DynamoDBv2.DataModel;
 using Amazon.DynamoDBv2.DocumentModel;
 using Amazon.DynamoDBv2.Model;
 using Amazon.Runtime.Internal.Util;
+using Microsoft.VisualBasic;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
+using System.Reflection;
 using System.Text.Json;
 using System.Xml.Linq;
 
@@ -53,7 +56,8 @@ namespace Jaype.DynamoDb
             { "string", "S"},
             { "datetime", "S"},
             { "ienumerable`1", "SS"},
-            { "nullable`1", "N"}
+            { "nullable`1", "N"},
+            { "ilist`1", "L"}
         }; //todo: move this out
 
         public DynamoDbStore(IAmazonDynamoDB client, Action<DynamoDbStoreOptions> options)
@@ -388,7 +392,7 @@ namespace Jaype.DynamoDb
         private Dictionary<string, AttributeValue> DetermineAttributeValues<T>(T item) where T : class
         {
             var map =new Dictionary<string, AttributeValue>();
-            var properties = typeof(T).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            var properties = item.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
             foreach (var property in properties)
             {
                 if (!map.ContainsKey(property.Name))
@@ -429,6 +433,21 @@ namespace Jaype.DynamoDb
                     {
                         var underyingType = Nullable.GetUnderlyingType(clrProperty.PropertyType);
                         value = value?.ToString();                       
+                    } 
+                    else if(dynamoDbType == "L")
+                    {
+                        var innerType = clrProperty.PropertyType.GetTypeInfo().GetGenericArguments()[0];
+                        //var innerType = clrProperty.GetType().GenericTypeArguments[0];
+                        IList unboxedList = ReflectionHelper.CastToList(innerType, value);
+                        var listContent = new List<AttributeValue>();
+                        //var listContentItem = new Dictionary<string, AttributeValue>();
+                        foreach(var item in unboxedList)
+                        {
+                            var listContentItem = DetermineAttributeValues(item);
+                            listContent.Add(new AttributeValue() { M = listContentItem });
+                            //new AttributeValue() { L  }
+                        } 
+                        value = listContent;
                     }
                       
                     attr.GetType().GetProperty(dynamoDbType).SetValue(attr, value);
@@ -457,9 +476,18 @@ namespace Jaype.DynamoDb
             };
 
             AttributeDefinition attr = null;
-            var clrProperty = type.GetType().GetProperty(member.ToString());
-            var clrType = clrProperty.PropertyType.Name.ToLower();
-            if(_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
+            string clrMemberType = null;
+            if(type.GetType().GetProperty(member.ToString()) != null)
+            {
+                var clrProperty = type.GetType().GetProperty(member.ToString());
+                clrMemberType = clrProperty.PropertyType.Name.ToLower();
+            } 
+            else
+            {
+                clrMemberType = member.GetType().Name.ToLower();
+            }
+
+            if (_clrToDynamoTypesMap.TryGetValue(clrMemberType, out var dynamoDbType))
             {
                 var scalarAttributeType = mapper(dynamoDbType);
                 attr = new AttributeDefinition(SanitizePropertyKeyName(member.ToString()), scalarAttributeType);

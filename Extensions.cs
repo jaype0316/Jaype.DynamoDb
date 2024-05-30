@@ -22,6 +22,14 @@ namespace Jaype.DynamoDb
             {
                 name = unaryMemberExpression.Member.Name;
             }
+            else if(exp.Body is BlockExpression)
+            {
+                name = exp.Body.ToString(); 
+
+            } else if(exp.Body is ConstantExpression)
+            {
+                name = exp.Body.ToString();
+            }
             return name;
         }
 
