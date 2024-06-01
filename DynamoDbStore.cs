@@ -77,7 +77,7 @@ namespace Jaype.DynamoDb
             : this(new AmazonDynamoDBClient(accessKey, secretKey, region), options) { }
 
         public async Task<T> GetSingleOrDefault<T>(Expression<Func<T, object>> pkeyExpression, object pkeyValue, 
-                                                            Expression<Func<T, object>> skeyExpression, object sortKeyValue) where T : class
+                                                            Expression<Func<T, object>> skeyExpression = null, object sortKeyValue = null) where T : class
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = DetermineTableName(instance);
@@ -85,24 +85,26 @@ namespace Jaype.DynamoDb
                 throw new InvalidOperationException($"{tableName} does not exist");
 
             var partitionKeyProperty = pkeyExpression.GetPropertyName(); 
-            var sortKeyProperty = skeyExpression.GetPropertyName();
+            var sortKeyProperty = skeyExpression != null ? skeyExpression.GetPropertyName() : null;
                 
-            var pKeyAttributeValue = TryResolveKeyAttributeValue(instance, partitionKeyProperty);
-            var sKeyAttributeValue = TryResolveKeyAttributeValue(instance, sortKeyProperty);
+            var pKeyAttributeValue = TryResolveKeyAttributeValue(instance, partitionKeyProperty, propertyValue:pkeyValue);
+            var sKeyAttributeValue = skeyExpression != null ? TryResolveKeyAttributeValue(instance, sortKeyProperty, propertyValue:sortKeyValue) : null;
 
             var pKeyPropertySanitized = SanitizePropertyKeyName(partitionKeyProperty);
-            var sKeyPropertySanitized = SanitizePropertyKeyName(sortKeyProperty);
+            var sKeyPropertySanitized = skeyExpression != null ? SanitizePropertyKeyName(sortKeyProperty) : null;
 
             var getItemRequest = new GetItemRequest
             {
                 TableName = tableName,
                 Key = new Dictionary<string, AttributeValue>()
                 {
-                     { pKeyPropertySanitized, pKeyAttributeValue },
-                     { sKeyPropertySanitized, sKeyAttributeValue }
+                     { pKeyPropertySanitized, pKeyAttributeValue }
+                    // { sKeyPropertySanitized, sKeyAttributeValue }
                 }
             };
-
+            if(sKeyAttributeValue != null)
+                getItemRequest.Key.Add(sKeyPropertySanitized, sKeyAttributeValue);
+            
             var response = await _client.GetItemAsync(getItemRequest);
             var itemAsDocument = Document.FromAttributeMap(response.Item);
             var asJson = itemAsDocument?.ToJson();
@@ -113,21 +115,21 @@ namespace Jaype.DynamoDb
         /// 
         /// </summary>
         /// <typeparam name="T"></typeparam>
-        /// <param name="pkeyExpression">The partition key to use for the table</param>
-        /// <param name="skeyExpression">The sort key to use for the table</param>
+        /// <param name="partitionKeyExpression">The partition key to use for the table</param>
+        /// <param name="sortKeyExpression">The sort key to use for the table</param>
         /// <returns></returns>
-        public async Task<Response> CreateTable<T>(Expression<Func<T, object>> pkeyExpression, Expression<Func<T, object>> skeyExpression) where T : class
+        public async Task<Response> CreateTable<T>(Expression<Func<T, object>> partitionKeyExpression, Expression<Func<T, object>> sortKeyExpression = null) where T : class
         {
             var instance = Activator.CreateInstance<T>();
             var tableName = this.DetermineTableName<T>(instance);
             if (await TableExists(tableName))
                 return new Response(System.Net.HttpStatusCode.BadRequest, message:"Table already exists");
             
-            var partitionKey = pkeyExpression.GetPropertyName();
-            var sortKey = skeyExpression.GetPropertyName();
+            var partitionKey = partitionKeyExpression.GetPropertyName();
+            var sortKey = sortKeyExpression != null  ? sortKeyExpression.GetPropertyName() : null;
 
             var partitionKeySanitized = SanitizePropertyKeyName(partitionKey);
-            var sortKeySanitized = SanitizePropertyKeyName(sortKey);
+            var sortKeySanitized = sortKey != null ? SanitizePropertyKeyName(sortKey) : null;
             var request = new CreateTableRequest
             {
                 TableName = tableName,
@@ -405,7 +407,12 @@ namespace Jaype.DynamoDb
             return map;
         }
 
-        private AttributeValue TryResolveKeyAttributeValue<TType, TMember>(TType type, TMember member)
+        private bool IsDefaultValue(object value)
+        {
+            return value == default || value as DateTime? == DateTime.MinValue;
+        }
+
+        private AttributeValue TryResolveKeyAttributeValue<TType, TMember>(TType type, TMember member, object propertyValue = null)
         {
             try
             {
@@ -415,43 +422,46 @@ namespace Jaype.DynamoDb
                 if (_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
                 {
                     attr = new AttributeValue();
-                    
-                    var value = clrProperty.GetValue(type);
+
+                    var possibleValue = clrProperty.GetValue(type);
+                    var isDefaultValue = IsDefaultValue(possibleValue);
+                    var determinedValue = isDefaultValue ? propertyValue : possibleValue;
                     if (dynamoDbType == "N" || dynamoDbType == "S")
                     {
-                        value = value?.ToString(); //per aws docs, number types are sent as strings to dynamoDb
-                        if (value == default)
+                        determinedValue = determinedValue?.ToString(); //per aws docs, number types are sent as strings to dynamoDb
+                        if (determinedValue == default)
                             return null;
                     }
                     if (dynamoDbType == "SS")
                     {
-                        value = value as List<string> ?? new List<string>();
-                        if ((value as List<string>).Count == default)
+                        determinedValue = determinedValue as List<string> ?? new List<string>();
+                        if ((determinedValue as List<string>).Count == default)
                             return null;
                     }
                     if (clrType == "nullable`1")
                     {
                         var underyingType = Nullable.GetUnderlyingType(clrProperty.PropertyType);
-                        value = value?.ToString();                       
+                        determinedValue = determinedValue?.ToString();                       
                     } 
                     else if(dynamoDbType == "L")
                     {
-                        //var innerType = clrProperty.PropertyType.GetTypeInfo().GetGenericArguments()[0];
-                        //IList unboxedList = ReflectionHelper.CastToList(innerType, value);
-                        //var listContent = new List<AttributeValue>();
+                        var innerType = clrProperty.PropertyType.GetTypeInfo().GetGenericArguments()[0];
+                        IList unboxedList = ReflectionHelper.CastToList(innerType, determinedValue);
+                        var listContent = new List<AttributeValue>();
 
-                        //foreach(var item in unboxedList)
-                        //{
-                        //    var listContentItem = DetermineAttributeValues(item);
-                        //    listContent.Add(new AttributeValue() { M = listContentItem });
-                        //} 
-                        //value = listContent;
+                        foreach (var item in unboxedList)
+                        {
+                            var listContentItem = DetermineAttributeValues(item);
+                            listContent.Add(new AttributeValue() { M = listContentItem });
+                        }
+                        determinedValue = listContent;
+
                         //override the L dynamo type, setting it to S and just serializing the value to a json string.
-                        dynamoDbType = "S";
-                        value = JsonSerializer.Serialize(value);
+                        //dynamoDbType = "S";
+                        //determinedValue = JsonSerializer.Serialize(determinedValue);
                     }
-                      
-                    attr.GetType().GetProperty(dynamoDbType).SetValue(attr, value);
+
+                    attr.GetType().GetProperty(dynamoDbType).SetValue(attr, determinedValue);
                 }
 
                 return attr;
