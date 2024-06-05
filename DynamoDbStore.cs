@@ -57,7 +57,9 @@ namespace Jaype.DynamoDb
             { "datetime", "S"},
             { "ienumerable`1", "SS"},
             { "nullable`1", "N"},
-            { "ilist`1", "L"}
+            { "ilist`1", "L"},
+             { "list`1", "L"},
+             { "struct", "M"}
         }; //todo: move this out
 
         public DynamoDbStore(IAmazonDynamoDB client, Action<DynamoDbStoreOptions> options)
@@ -418,7 +420,7 @@ namespace Jaype.DynamoDb
             {
                 AttributeValue attr = null;
                 var clrProperty = type.GetType().GetProperty(member.ToString());
-                var clrType = clrProperty.PropertyType.Name.ToLower();
+                var clrType = clrProperty.PropertyType.IsCustomStruct() ? "struct" : clrProperty.PropertyType.Name.ToLower();
                 if (_clrToDynamoTypesMap.TryGetValue(clrType, out var dynamoDbType))
                 {
                     attr = new AttributeValue();
@@ -459,6 +461,9 @@ namespace Jaype.DynamoDb
                         //override the L dynamo type, setting it to S and just serializing the value to a json string.
                         //dynamoDbType = "S";
                         //determinedValue = JsonSerializer.Serialize(determinedValue);
+                    } else if(dynamoDbType == "M")
+                    {
+                        determinedValue = DetermineAttributeValues(determinedValue);
                     }
 
                     attr.GetType().GetProperty(dynamoDbType).SetValue(attr, determinedValue);

@@ -62,5 +62,14 @@ namespace Jaype.DynamoDb
 
             return value + "s";
         }
+
+        public static bool IsCustomStruct(this Type type)
+        {
+            // Ensure it's a value type, not an enum, and not a primitive type
+            return type.IsValueType &&
+                   !type.IsEnum &&
+                   !type.IsPrimitive &&
+                   type.Namespace != "System";
+        }
     }
 }
