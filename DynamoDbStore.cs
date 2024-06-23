@@ -108,6 +108,8 @@ namespace Jaype.DynamoDb
                 getItemRequest.Key.Add(sKeyPropertySanitized, sKeyAttributeValue);
             
             var response = await _client.GetItemAsync(getItemRequest);
+            if(response.Item.Count == 0)
+                return default(T);
             var itemAsDocument = Document.FromAttributeMap(response.Item);
             var asJson = itemAsDocument?.ToJson();
             return JsonSerializer.Deserialize<T>(asJson, _jsonSerializerOptions);
